@@ -1,0 +1,904 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Symmetry Lending Pricer</title>
+  <style>
+    :root { --card:#111827; --muted:#94a3b8; --text:#e5e7eb; --accent:#60a5fa; --bad:#fb7185; }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:linear-gradient(180deg,#050816,#0b0f19);color:var(--text)}
+    .wrap{max-width:1180px;margin:0 auto;padding:28px}
+    h1{font-size:22px;margin:0 0 8px}
+    .sub{color:var(--muted);margin:0 0 18px;font-size:13px;line-height:1.45}
+    .grid{display:grid;grid-template-columns:1.15fr 0.85fr;gap:16px}
+    @media(max-width:980px){.grid{grid-template-columns:1fr}}
+    .card{background:rgba(17,24,39,.75);border:1px solid rgba(148,163,184,.12);border-radius:16px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.35)}
+    label{display:block;font-size:12px;color:var(--muted);margin:10px 0 6px}
+    input,select{width:100%;padding:10px 12px;border-radius:12px;border:1px solid rgba(148,163,184,.18);background:#0b1220;color:var(--text);outline:none}
+    input:focus,select:focus{border-color:rgba(96,165,250,.7);box-shadow:0 0 0 3px rgba(96,165,250,.15)}
+    input[readonly]{opacity:.9}
+    .row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+    .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:11px 14px;border-radius:12px;border:1px solid rgba(96,165,250,.35);background:rgba(96,165,250,.14);color:var(--text);cursor:pointer;font-weight:900}
+    .btn:hover{background:rgba(96,165,250,.2)}
+    .btnDanger{background:rgba(251,113,133,.10);border-color:rgba(251,113,133,.35)}
+    .drop{border:1px dashed rgba(148,163,184,.35);border-radius:16px;padding:14px;background:rgba(2,6,23,.4);cursor:pointer}
+    .drop.drag{border-color:rgba(96,165,250,.9);box-shadow:0 0 0 3px rgba(96,165,250,.15)}
+    .pill{display:inline-flex;gap:8px;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid rgba(148,163,184,.18);background:rgba(2,6,23,.5);color:var(--muted);font-size:12px}
+    .kpi{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap}
+    .kpi .big{font-size:34px;font-weight:950;letter-spacing:-.02em}
+    .kpi .mid{font-size:18px;font-weight:850}
+    .kpi .lbl{color:var(--muted);font-size:12px}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+    .small{font-size:12px;color:var(--muted);line-height:1.55}
+    .line{height:1px;background:rgba(148,163,184,.12);margin:14px 0}
+    .bad{color:var(--bad)}
+    pre{white-space:pre-wrap;word-break:break-word;background:rgba(2,6,23,.6);border:1px solid rgba(148,163,184,.12);padding:12px;border-radius:12px;overflow:auto}
+    details{margin-top:10px}
+    .note{margin-top:6px;font-size:11px;color:var(--muted)}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Symmetry Lending Pricer <span class="pill">v5.2</span></h1>
+    <p class="sub">
+      Upload pricing guide PDF → enter scenario → get <b>Start Rate</b> + <b>Interest-Only Payment</b>.
+      <br><span class="mono">CLTV = (First Lien + HELOC line) / Value</span> • <span class="mono">IO Payment = Draw × (Rate/12)</span>
+      <br><span class="note">Guideline gating: pricer blocks scenarios that exceed max HCLTV, miss min FICO, or miss minimum initial draw (per PDF).</span>
+    </p>
+
+    <div class="grid">
+      <div class="card">
+        <div id="drop" class="drop" title="Click to upload, or drag & drop">
+          <div style="display:flex;gap:10px;align-items:center;justify-content:space-between;flex-wrap:wrap">
+            <div>
+              <div style="font-weight:950">Drag & drop a rate sheet PDF (or click)</div>
+              <div class="note" id="fileMeta"></div>
+            </div>
+            <span id="status" class="pill">No PDF loaded</span>
+          </div>
+          <input id="file" type="file" accept="application/pdf" style="margin-top:12px" />
+          <div class="row" style="margin-top:10px">
+            <button id="reparseBtn" class="btn" type="button">Re-parse last selected PDF</button>
+            <button id="clearCache" class="btn btnDanger" type="button">Clear saved sheet</button>
+          </div>
+          <div class="note">If you see “PDF engine not loaded”, your network is blocking the PDF.js CDN — tell me and I’ll bundle it locally.</div>
+        </div>
+
+        <div class="line"></div>
+
+        <div class="row">
+          <div>
+            <label>Lien Position</label>
+            <select id="lien">
+              <option value="first">First Lien HELOC</option>
+              <option value="second" selected>Second Lien HELOC</option>
+            </select>
+            <div class="note">For a true 1st lien HELOC with no other liens, set First Lien Amount to $0.</div>
+          </div>
+          <div>
+            <label>Product</label>
+            <select id="product">
+              <option value="standalone">Standalone HELOC</option>
+              <option value="piggyback">Piggyback HELOC</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row3">
+          <div>
+            <label>FICO</label>
+            <input id="fico" type="number" min="300" max="850" value="720" />
+          </div>
+          <div>
+            <label>Home Value ($)</label>
+            <input id="homeValue" type="number" min="0" step="1000" value="500000" />
+          </div>
+          <div>
+            <label>First Lien Amount ($)</label>
+            <input id="firstLien" type="number" min="0" step="1000" value="300000" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label>Target CLTV %</label>
+            <input id="targetCltv" type="number" min="0" max="150" step="0.01" value="80.00" />
+            <div class="note">Changing Target CLTV auto-updates the HELOC line amount.</div>
+          </div>
+          <div>
+            <label>HELOC Line Amount ($) <span class="pill">rate/CLTV uses this</span></label>
+            <input id="lineAmt" type="number" min="0" step="1000" value="100000" />
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label>Draw Amount ($) <span class="pill">payment uses this</span></label>
+            <input id="drawAmt" type="number" min="0" step="1000" value="100000" />
+          </div>
+          <div>
+            <label>Prime Rate (from sheet)</label>
+            <input id="primeDisplay" type="text" readonly value="—" />
+            <div class="note">Prime is pulled from the uploaded PDF.</div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label>Draw Term</label>
+            <select id="drawTerm">
+              <option value="5">5 years</option>
+              <option value="10">10 years</option>
+            </select>
+          </div>
+          <div>
+            <label>Occupancy</label>
+            <select id="occupancy">
+              <option value="primary" selected>Primary / Second Home</option>
+              <option value="investment">Investment Property</option>
+            </select>
+
+            <label style="margin-top:10px">Property State (min initial draw)</label>
+            <select id="state">
+              <option value="OTHER" selected>Other</option>
+              <option value="AZ">AZ</option>
+              <option value="CA">CA</option>
+              <option value="FL">FL</option>
+              <option value="OR">OR</option>
+              <option value="WA">WA</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row">
+          <div>
+            <label>Property Type</label>
+            <select id="propType">
+              <option value="sfr" selected>SFR</option>
+              <option value="condo">Condo</option>
+              <option value="mh">Manufactured Home</option>
+            </select>
+          </div>
+          <div style="display:flex;align-items:end">
+            <button id="priceBtn" class="btn" type="button">Price Scenario</button>
+          </div>
+        </div>
+
+        <details>
+          <summary class="small">Show parsed sheet JSON (debug)</summary>
+          <pre id="json" class="mono">Upload a PDF to see parsed data.</pre>
+        </details>
+      </div>
+
+      <div class="card">
+        <div class="kpi">
+          <div>
+            <div class="lbl">Start Rate</div>
+            <div id="startRate" class="big">—</div>
+          </div>
+          <div class="pill mono" id="primePill">Prime: —</div>
+          <div class="pill mono" id="marginPill">Margin: —</div>
+          <div class="pill mono" id="cltvPill">CLTV: —</div>
+        </div>
+
+        <div class="line"></div>
+
+        <div class="kpi" style="align-items:center">
+          <div>
+            <div class="lbl">Interest-Only Payment (monthly)</div>
+            <div id="ioPay" class="mid">—</div>
+          </div>
+        </div>
+
+        <div class="line"></div>
+
+        <div class="small">
+          <div><b>Matched row/col:</b> <span class="mono" id="match">—</span></div>
+          <div><b>Rate sheet cell:</b> <span class="mono" id="cell">—</span></div>
+          <div style="margin-top:10px"><b>Margin breakdown (pp):</b></div>
+          <ul id="breakdown" style="margin:6px 0 0 18px;padding:0"></ul>
+        </div>
+
+        <div class="line"></div>
+        <div id="err" class="small bad" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.min.js"></script>
+  <script>
+    if (window.pdfjsLib) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@2.16.105/build/pdf.worker.min.js";
+    }
+  </script>
+
+  <script>
+  (function(){
+    const $ = (id)=>document.getElementById(id);
+
+    const drop = $("drop");
+    const fileInput = $("file");
+    const status = $("status");
+    const jsonEl = $("json");
+    const errEl = $("err");
+    const fileMeta = $("fileMeta");
+
+    const startRateEl = $("startRate");
+    const primePill = $("primePill");
+    const marginPill = $("marginPill");
+    const cltvPill = $("cltvPill");
+    const ioPayEl = $("ioPay");
+    const matchEl = $("match");
+    const cellEl = $("cell");
+    const breakdownEl = $("breakdown");
+    const primeDisplay = $("primeDisplay");
+
+    const LS_KEY = "symmetry_pricer_sheet_v52";
+    let lastSelectedFile = null;
+    let syncing = false;
+
+    function showError(msg){
+      errEl.style.display="block";
+      errEl.textContent=msg;
+    }
+    function clearError(){
+      errEl.style.display="none";
+      errEl.textContent="";
+    }
+    function setStatus(txt){ status.textContent = txt; }
+
+    function setFileMeta(file){
+      if (!file){ fileMeta.textContent=""; return; }
+      fileMeta.textContent = `Selected: ${file.name} (${(file.size/1024/1024).toFixed(2)} MB)`;
+    }
+
+    function money(n){
+      if (!Number.isFinite(n)) return "—";
+      return n.toLocaleString(undefined,{style:"currency",currency:"USD",maximumFractionDigits:2});
+    }
+
+    function pctToFloat(s){
+      if (!s) return null;
+      s = String(s).trim();
+      if (!s) return null;
+      if (["N/A","NA"].includes(s.toUpperCase())) return null;
+      s = s.replace("%","").replace("+","").trim();
+      const v = Number(s);
+      return Number.isFinite(v) ? v/100 : null;
+    }
+
+    function parsePrime(text){
+      const m = text.match(/Prime Rate:\s*([0-9]+(?:\.[0-9]+)?)\s*%/i);
+      if (!m) throw new Error("Could not find 'Prime Rate: X%' in PDF text.");
+      return Number(m[1]);
+    }
+
+    function parseEffective(text){
+      const m = text.match(/Effective Date:\s*([0-9]{1,2}\/[0-9]{1,2}\/[0-9]{2,4})/i);
+      return m ? m[1] : null;
+    }
+
+    function itemsToLines(items){
+      const rows = new Map();
+      const yTol = 2.0;
+      const snapY = (y)=> (Math.round(y / yTol) * yTol).toFixed(2);
+      for (const it of items){
+        const str = (it.str||"").trim();
+        if (!str) continue;
+        const x = it.transform[4];
+        const y = it.transform[5];
+        const k = snapY(y);
+        if (!rows.has(k)) rows.set(k, []);
+        rows.get(k).push({x, str});
+      }
+      const ys = Array.from(rows.keys()).map(Number).sort((a,b)=>b-a);
+      const lines=[];
+      for (const y of ys){
+        const k = y.toFixed(2);
+        const segs = rows.get(k).sort((a,b)=>a.x-b.x);
+        const line = segs.map(s=>s.str).join(" ").replace(/\s+/g," ").trim();
+        if (line) lines.push(line);
+      }
+      return lines;
+    }
+
+    async function extractLinesFromPdf(file){
+      const buf = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({data:buf}).promise;
+      let allLines=[], fullText="";
+      for (let p=1;p<=pdf.numPages;p++){
+        const page = await pdf.getPage(p);
+        const content = await page.getTextContent();
+        allLines = allLines.concat(itemsToLines(content.items));
+        fullText += content.items.map(it=>it.str).join("\n") + "\n";
+      }
+      const cleaned=[];
+      for (const l of allLines){
+        const ll=l.replace(/\s+/g," ").trim();
+        if (!ll) continue;
+        if (cleaned.length && cleaned[cleaned.length-1]===ll) continue;
+        cleaned.push(ll);
+      }
+      return {lines:cleaned, text:fullText};
+    }
+
+    function windowText(text, startNeedle, endNeedle){
+      const i = text.toLowerCase().indexOf(startNeedle.toLowerCase());
+      if (i===-1) return "";
+      const j = endNeedle ? text.toLowerCase().indexOf(endNeedle.toLowerCase(), i+1) : -1;
+      return j===-1 ? text.slice(i) : text.slice(i,j);
+    }
+
+    function parseStandalone(lines, fullText){
+      const rowRx = /^(760\+|720-759|700-719|680-699)\s+((?:\d+(?:\.\d+)?%|N\/A|NA)\s+){2,3}(\d+(?:\.\d+)?%|N\/A|NA)$/i;
+      const rowMap = new Map();
+
+      let section = lines;
+      const sIdx = lines.findIndex(l => /Standalone HELOC/i.test(l));
+      if (sIdx !== -1) section = lines.slice(sIdx, sIdx+220);
+
+      for (const l of section){
+        const m = l.match(rowRx);
+        if (!m) continue;
+        const parts = l.split(" ");
+        const band = parts[0];
+        const vals = parts.slice(1).filter(x => /%|N\/A|NA/i.test(x)).slice(0,3);
+        if (vals.length===3) rowMap.set(band, vals);
+      }
+
+      if (rowMap.size>=3){
+        const rows = ["760+","720-759","700-719","680-699"].filter(r => rowMap.has(r));
+        const values = rows.map(r => rowMap.get(r));
+        return { name:"Standalone HELOC Base Margin Over Prime", rows, cols:["≤70%",">70-80%",">80-89.99%"], values };
+      }
+
+      const w = windowText(fullText, "Standalone HELOC", "Piggyback HELOC");
+      if (!w) return null;
+
+      const bucketGroupRx = /(≤\s*70%|<=\s*70%|>70-80%|>70\s*-\s*80%|>80-89\.99%|>80\s*-\s*89\.99%)[\s\S]{0,80}?((?:\d+(?:\.\d+)?%|N\/A|NA)\s+){2}(\d+(?:\.\d+)?%|N\/A|NA)/gi;
+      const byBucket = new Map();
+
+      function normBucket(b){
+        const x=b.replace(/\s+/g,"");
+        if (x.startsWith("≤70")||x.startsWith("<=70")) return "≤70%";
+        if (x.includes(">70")&&x.includes("80")) return ">70-80%";
+        if (x.includes(">80")&&x.includes("89.99")) return ">80-89.99%";
+        return x;
+      }
+
+      let m;
+      while ((m=bucketGroupRx.exec(w))!==null){
+        const label = normBucket(m[1]);
+        const valsBlob = m[0].replace(m[1],"").trim();
+        const vals = valsBlob.split(/\s+/).filter(x=>/%|N\/A|NA/i.test(x)).slice(0,3);
+        if (vals.length===3 && !byBucket.has(label)) byBucket.set(label, vals);
+      }
+
+      const row680 = w.match(/680-699\s+(\d+(?:\.\d+)?%|N\/A|NA)\s+(\d+(?:\.\d+)?%|N\/A|NA)\s+(N\/A|NA|\d+(?:\.\d+)?%)/i);
+      if (byBucket.size>=2){
+        const cols=["≤70%",">70-80%",">80-89.99%"];
+        const v760=[], v720=[], v700=[];
+        for (const c of cols){
+          const vals=byBucket.get(c);
+          if (!vals){ v760.push("N/A"); v720.push("N/A"); v700.push("N/A"); }
+          else { v760.push(vals[0]); v720.push(vals[1]); v700.push(vals[2]); }
+        }
+        const values=[v760,v720,v700];
+        values.push(row680 ? [row680[1],row680[2],row680[3]] : ["N/A","N/A","N/A"]);
+        return { name:"Standalone HELOC Base Margin Over Prime", rows:["760+","720-759","700-719","680-699"], cols, values };
+      }
+      return null;
+    }
+
+    function parsePiggyback(lines){
+      const startIdx = lines.findIndex(l=>/Piggyback HELOC/i.test(l));
+      if (startIdx===-1) return null;
+
+      let headerIdx=-1;
+      for (let i=startIdx;i<Math.min(lines.length,startIdx+200);i++){
+        if (/Draw Amount/i.test(lines[i]) && /\$/.test(lines[i])) { headerIdx=i; break; }
+      }
+      if (headerIdx===-1) return null;
+
+      const headerLine=lines[headerIdx];
+      const bucketRx=/(\$[0-9,]+k?\s*-\s*\$?[0-9,]+k?|\$[0-9,]+k?\s*\+)/ig;
+      const buckets=[]; let m;
+      while ((m=bucketRx.exec(headerLine))!==null) buckets.push(m[1].replace(/\s+/g,""));
+      if (!buckets.length) return null;
+
+      const rows=[], values=[];
+      for (let i=headerIdx+1;i<Math.min(lines.length,headerIdx+220);i++){
+        const l=lines[i];
+        if (/Standalone HELOC/i.test(l)) break;
+        const parts=l.split(" ");
+        const band=parts[0];
+        if (!/^\d{3}(\+|-\d{2,3})?$/.test(band)) continue;
+        const cells=parts.slice(1).filter(x=>/%|N\/A|NA/i.test(x));
+        if (cells.length>=buckets.length){
+          rows.push(band);
+          values.push(cells.slice(0,buckets.length));
+        }
+      }
+      if (!rows.length) return null;
+      return { name:"Piggyback HELOC Base Margin Over Prime", rows, cols:buckets, values };
+    }
+
+    function parseGuidelines(lines, text){
+      // Max HCLTV (line before "Maximum HCLTV+")
+      let maxHcltvLine = null;
+      for (let i=0;i<lines.length;i++){
+        if (/Maximum HCLTV/i.test(lines[i]) && i>0){ maxHcltvLine = lines[i-1]; break; }
+      }
+      const pcts = maxHcltvLine ? (maxHcltvLine.match(/[0-9]+(?:\.[0-9]+)?%/g) || []) : [];
+      const max = {
+        piggyback: { primary: null, investment: null },
+        standalone_second: { primary: null, investment: null },
+        standalone_first: { primary: null, investment: null }
+      };
+      if (pcts.length >= 6){
+        const vals = pcts.slice(0,6).map(s=>Number(s.replace("%","")));
+        max.piggyback.primary = vals[0];
+        max.piggyback.investment = vals[1];
+        max.standalone_second.primary = vals[2];
+        max.standalone_second.investment = vals[3];
+        max.standalone_first.primary = vals[4];
+        max.standalone_first.investment = vals[5];
+      }
+
+      // Minimum FICO** (best-effort mapping for this sheet layout)
+      const iMin = lines.findIndex(l => /Minimum FICO/i.test(l));
+      const l1 = iMin>=0 ? lines[iMin] : "";
+      const l2 = (iMin>=0 && iMin+1<lines.length) ? lines[iMin+1] : "";
+      const nums1 = (l1.match(/\b[6-8][0-9]{2}\b/g) || []).map(Number);
+      const nums2 = (l2.match(/\b[6-8][0-9]{2}\b/g) || []).map(Number);
+
+      const minFico = {
+        piggyback: { primary: null, investment: null },
+        standalone_second: { primary_le80: null, primary_gt80: null, investment: null },
+        standalone_first: { primary: null, investment: null }
+      };
+      if (nums1.length >= 6){
+        minFico.piggyback.primary = nums1[0];
+        minFico.piggyback.investment = nums1[1];
+        minFico.standalone_second.primary_le80 = nums1[2];
+        minFico.standalone_second.primary_gt80 = nums1[3];
+        minFico.standalone_first.primary = nums1[4];
+        // placeholder; often overridden by line 2
+        minFico.standalone_first.investment = nums1[5];
+      }
+      if (nums2.length >= 2){
+        minFico.standalone_second.investment = nums2[0];
+        minFico.standalone_first.investment = nums2[1];
+      }
+
+      // Minimum Initial Draw block
+      let minDrawOther=null, minDrawAll=null, minDrawRestricted=null;
+      for (let i=0;i<lines.length;i++){
+        if (/Minimum Initial Draw/i.test(lines[i])){
+          const m1 = lines[i].match(/\$([0-9,]+)/);
+          if (m1) minDrawOther = Number(m1[1].replace(/,/g,""));
+          if (i+1<lines.length){
+            const m2 = lines[i+1].match(/\$([0-9,]+)/);
+            if (m2) minDrawAll = Number(m2[1].replace(/,/g,""));
+          }
+          if (i+2<lines.length){
+            const m3 = lines[i+2].match(/\$([0-9,]+)/);
+            if (m3) minDrawRestricted = Number(m3[1].replace(/,/g,""));
+          }
+          break;
+        }
+      }
+
+      return {
+        max_hcltv: max,
+        min_fico: minFico,
+        min_initial_draw: {
+          other_states: minDrawOther,
+          all_states: minDrawAll,
+          restricted_states: minDrawRestricted,
+          restricted_list: ["AZ","CA","FL","OR","WA"]
+        }
+      };
+    }
+
+    function parseAddOns(text){
+      const addOns=[];
+      const patterns=[
+        { rx:/10\s*Year\s*Draw\s*Term\s*\+?\s*([0-9]+(?:\.[0-9]+)?)\s*%/i, name:"10 Year Draw Term" },
+        { rx:/Draw\s*Amount\s*\$50,?000\s*-\s*\$99,?999.*?\+?\s*([0-9]+(?:\.[0-9]+)?)\s*%/i, name:"Draw Amount $50k-$99,999 (Standalone)" },
+        { rx:/Manufactured\s*Home.*?\+?\s*([0-9]+(?:\.[0-9]+)?)\s*%/i, name:"Manufactured Home" },
+        { rx:/Condo.*?\+?\s*([0-9]+(?:\.[0-9]+)?)\s*%/i, name:"Condo" },
+        { rx:/Non\s*Owner\s*Occupied\s*Investment\s*Property[\s\S]*?\+?\s*([0-9]+(?:\.[0-9]+)?)\s*%/i, name:"Non Owner Occupied Investment Property" },
+        { rx:/(Non\s*Owner\s*Occupied[\s\S]*?Investment\s*Property|Investment\s*Property)[\s\S]*?\+?\s*([0-9]+(?:\.[0-9]+)?)\s*%/i, name:"Non Owner Occupied Investment Property", group:2 },
+      ];
+      for (const p of patterns){
+        const m=text.match(p.rx);
+        if (!m) continue;
+        const raw = p.group ? m[p.group] : m[1];
+        const val = Number(raw);
+        if (!Number.isFinite(val)) continue;
+        addOns.push({ name:p.name, margin_delta: val/100 });
+      }
+      return addOns;
+    }
+
+    function getMaxHcltvFor(inputs, g){
+      const occ = (inputs.occupancy==="investment") ? "investment" : "primary";
+      if (inputs.product==="piggyback") return g.max_hcltv.piggyback[occ];
+      const key = (inputs.lien==="first") ? "standalone_first" : "standalone_second";
+      return g.max_hcltv[key][occ];
+    }
+    function getMinFicoFor(inputs, g){
+      const occInv = (inputs.occupancy==="investment");
+      if (inputs.product==="piggyback"){
+        return occInv ? g.min_fico.piggyback.investment : g.min_fico.piggyback.primary;
+      }
+      if (inputs.lien==="first"){
+        return occInv ? g.min_fico.standalone_first.investment : g.min_fico.standalone_first.primary;
+      }
+      if (occInv) return g.min_fico.standalone_second.investment;
+      return (inputs.cltv>80.0) ? g.min_fico.standalone_second.primary_gt80 : g.min_fico.standalone_second.primary_le80;
+    }
+    function getMinInitialDrawFor(inputs, g){
+      const st = inputs.state || "OTHER";
+      const restricted = g.min_initial_draw.restricted_list.includes(st);
+      if (inputs.product==="piggyback"){
+        return g.min_initial_draw.all_states || g.min_initial_draw.other_states;
+      }
+      if (restricted) return g.min_initial_draw.restricted_states || g.min_initial_draw.all_states || g.min_initial_draw.other_states;
+      return g.min_initial_draw.other_states || g.min_initial_draw.all_states;
+    }
+    function enforceGuidelines(sheet, inputs){
+      const g = sheet.guidelines;
+      if (!g) return;
+      const maxH = getMaxHcltvFor(inputs, g);
+      if (Number.isFinite(maxH) && inputs.cltv > maxH + 1e-6){
+        throw new Error(`Ineligible: CLTV ${inputs.cltv.toFixed(2)}% exceeds max ${maxH.toFixed(2)}% per rate sheet.`);
+      }
+      const minF = getMinFicoFor(inputs, g);
+      if (Number.isFinite(minF) && inputs.fico < minF){
+        throw new Error(`Ineligible: FICO ${inputs.fico} is below minimum ${minF} per rate sheet.`);
+      }
+      const minD = getMinInitialDrawFor(inputs, g);
+      if (Number.isFinite(minD) && inputs.drawAmt < minD){
+        throw new Error(`Ineligible: Draw Amount ${inputs.drawAmt.toLocaleString()} is below minimum initial draw ${minD.toLocaleString()} per rate sheet.`);
+      }
+    }
+
+    function ficoRowIndex(rows, fico){
+      for (let i=0;i<rows.length;i++){
+        const r=rows[i].trim();
+        let m=r.match(/^(\d+)\+$/);
+        if (m){ if (fico>=Number(m[1])) return i; continue; }
+        m=r.match(/^(\d+)-(\d+)$/);
+        if (m){
+          const lo=Number(m[1]), hi=Number(m[2]);
+          if (fico>=lo && fico<=hi) return i;
+        }
+      }
+      return null;
+    }
+
+    function pickColForCltv(cols, cltvPct){
+      for (let i=0;i<cols.length;i++){
+        const c=cols[i].replace(/\s+/g,"");
+        let m=c.match(/(?:≤|<=)([0-9]+(?:\.[0-9]+)?)%/);
+        if (m && cltvPct<=Number(m[1])) return i;
+        m=c.match(/>([0-9]+(?:\.[0-9]+)?)\s*-\s*([0-9]+(?:\.[0-9]+)?)%/);
+        if (m){
+          const lo=Number(m[1]), hi=Number(m[2]);
+          if (cltvPct>lo && cltvPct<=hi) return i;
+        }
+        m=c.match(/>([0-9]+(?:\.[0-9]+)?)%/);
+        if (m && cltvPct>Number(m[1])) return i;
+      }
+      return null;
+    }
+
+    function pickColForDraw(cols, draw){
+      const norm=(s)=>s.replace(/,/g,"").replace(/\s+/g,"");
+      for (let i=0;i<cols.length;i++){
+        const c=norm(cols[i]);
+        let m=c.match(/\$([0-9]+)k-\$?([0-9]+)/i);
+        if (m){
+          const lo=Number(m[1])*1000, hi=Number(m[2]);
+          if (draw>=lo && draw<=hi) return i;
+        }
+        m=c.match(/\$([0-9]+)-\$(\d+)/);
+        if (m){
+          const lo=Number(m[1]), hi=Number(m[2]);
+          if (draw>=lo && draw<=hi) return i;
+        }
+        m=c.match(/\$([0-9,]+)k?\+/i);
+        if (m){
+          const raw=m[1].replace(/,/g,"");
+          const lo=Number(raw) * (c.includes("k+") ? 1000 : 1);
+          if (draw>=lo) return i;
+        }
+      }
+      return null;
+    }
+
+    function calcCltvPct(lien, homeValue, firstLien, lineAmt){
+      if (!homeValue || homeValue<=0) return NaN;
+      const senior = (firstLien||0);
+      return ((senior + (lineAmt||0)) / homeValue) * 100;
+    }
+
+    function calcLineFromTarget(lien, homeValue, firstLien, targetCltvPct){
+      if (!homeValue || homeValue<=0) return NaN;
+      const senior = (firstLien||0);
+      const total = (targetCltvPct/100.0) * homeValue;
+      return Math.max(0, total - senior);
+    }
+
+    function computeIO(drawAmt, startRatePct){
+      if (!Number.isFinite(drawAmt) || !Number.isFinite(startRatePct)) return NaN;
+      const r = (startRatePct/100.0)/12.0;
+      return drawAmt * r;
+    }
+
+    function getInputs(){
+      const lien = $("lien").value;
+      const product = $("product").value;
+      const fico = Number($("fico").value);
+      const homeValue = Number($("homeValue").value);
+      const firstLien = Number($("firstLien").value);
+      const lineAmt = Number($("lineAmt").value);
+      const drawAmt = Number($("drawAmt").value);
+      const cltv = calcCltvPct(lien, homeValue, firstLien, lineAmt);
+
+      return {
+        lien, product, fico, homeValue, firstLien,
+        lineAmt, drawAmt, cltv,
+        drawTermYears: Number($("drawTerm").value),
+        occupancy: $("occupancy").value,
+        propType: $("propType").value,
+        state: $("state").value
+      };
+    }
+
+    function priceScenario(sheet, inputs){
+      const baseTable = inputs.product==="standalone" ? sheet.standalone_table : sheet.piggyback_table;
+      if (!baseTable) throw new Error("No pricing table found for selected product. Upload the correct PDF.");
+
+      const rIdx = ficoRowIndex(baseTable.rows, inputs.fico);
+      if (rIdx===null) throw new Error("FICO does not match any row on the rate sheet.");
+
+      const cIdx = inputs.product==="standalone"
+        ? pickColForCltv(baseTable.cols, inputs.cltv)
+        : pickColForDraw(baseTable.cols, inputs.drawAmt);
+
+      if (cIdx===null) throw new Error("Could not match bucket (CLTV or Draw Amount) to rate sheet.");
+
+      const cell = baseTable.values[rIdx][cIdx];
+      const baseMargin = pctToFloat(cell);
+      if (baseMargin===null) throw new Error("This scenario is N/A on the rate sheet.");
+
+      let margin = baseMargin;
+      const breakdown = [{name:"Base margin", pp: baseMargin*100}];
+
+      // Add-ons (applied to both standalone & piggyback if found in sheet)
+      if (inputs.drawTermYears===10){
+        const rule=(sheet.add_ons||[]).find(r=>r.name.includes("10 Year Draw Term"));
+        if (rule){ margin += rule.margin_delta; breakdown.push({name:rule.name, pp: rule.margin_delta*100}); }
+      }
+      if (inputs.propType==="mh"){
+        const rule=(sheet.add_ons||[]).find(r=>r.name.includes("Manufactured"));
+        if (rule){ margin += rule.margin_delta; breakdown.push({name:rule.name, pp: rule.margin_delta*100}); }
+      }
+      if (inputs.propType==="condo"){
+        const rule=(sheet.add_ons||[]).find(r=>r.name.includes("Condo"));
+        if (rule){ margin += rule.margin_delta; breakdown.push({name:rule.name, pp: rule.margin_delta*100}); }
+      }
+      if (inputs.occupancy==="investment"){
+        const rule=(sheet.add_ons||[]).find(r=>r.name==="Non Owner Occupied Investment Property")
+          || (sheet.add_ons||[]).find(r=>/Non\s*Owner\s*Occupied|Investment\s*Property/i.test(r.name));
+        if (rule){ margin += rule.margin_delta; breakdown.push({name:rule.name, pp: rule.margin_delta*100}); }
+      }
+
+      // Standalone-only add-on per sheet phrasing
+      if (inputs.product==="standalone" && inputs.lineAmt>=50000 && inputs.lineAmt<=99999){
+        const rule=(sheet.add_ons||[]).find(r=>r.name.includes("$50k-$99,999"));
+        if (rule){ margin += rule.margin_delta; breakdown.push({name:rule.name, pp: rule.margin_delta*100}); }
+      }
+
+      const prime = sheet.prime_rate;
+      const startRatePct = (prime/100.0 + margin) * 100.0;
+
+      return {
+        prime,
+        cell,
+        row: baseTable.rows[rIdx],
+        col: baseTable.cols[cIdx],
+        marginPct: margin*100,
+        startRatePct,
+        breakdown
+      };
+    }
+
+    async function handlePdf(file){
+      clearError();
+      if (!window.pdfjsLib){
+        setStatus("PDF engine not loaded");
+        showError("PDF.js did not load. This is usually a network/CDN block. If you're on a restricted network, tell me and I’ll bundle PDF.js locally.");
+        return;
+      }
+      setStatus("Parsing…");
+      try{
+        const {lines, text} = await extractLinesFromPdf(file);
+        const sheet = {
+          source_name: file.name,
+          effective_date: parseEffective(text),
+          prime_rate: parsePrime(text),
+          guidelines: parseGuidelines(lines, text),
+          standalone_table: parseStandalone(lines, text),
+          piggyback_table: parsePiggyback(lines),
+          add_ons: parseAddOns(text),
+          parsed_at: new Date().toISOString()
+        };
+        if (!sheet.standalone_table && !sheet.piggyback_table){
+          throw new Error("Parsed Prime but could not find pricing tables in this PDF layout.");
+        }
+        localStorage.setItem(LS_KEY, JSON.stringify(sheet));
+        jsonEl.textContent = JSON.stringify(sheet, null, 2);
+        primePill.textContent = `Prime: ${Number(sheet.prime_rate).toFixed(2)}%`;
+        if (primeDisplay) primeDisplay.value = Number(sheet.prime_rate).toFixed(2) + "%";
+        setStatus("PDF loaded ✓");
+      } catch(e){
+        setStatus("Parse failed");
+        showError(e && e.message ? e.message : String(e));
+      }
+    }
+
+    function clearOutputs(){
+      startRateEl.textContent="—";
+      marginPill.textContent="Margin: —";
+      cltvPill.textContent="CLTV: —";
+      ioPayEl.textContent="—";
+      matchEl.textContent="—";
+      cellEl.textContent="—";
+      breakdownEl.innerHTML="";
+      clearError();
+    }
+
+    function loadSheet(){
+      const raw = localStorage.getItem(LS_KEY);
+      if (!raw) return null;
+      try{ return JSON.parse(raw); }catch{return null;}
+    }
+
+    function syncLineToTarget(){
+      if (syncing) return;
+      syncing = true;
+      const lien = $("lien").value;
+      const hv = Number($("homeValue").value);
+      const firstLien = Number($("firstLien").value);
+      const tgt = Number($("targetCltv").value);
+      if (Number.isFinite(tgt) && Number.isFinite(hv) && hv>0){
+        const line = calcLineFromTarget(lien, hv, firstLien, tgt);
+        if (Number.isFinite(line)) $("lineAmt").value = String(Math.round(line));
+      }
+      syncing = false;
+      updateCltvPill();
+      clearOutputs();
+    }
+
+    function syncTargetToLine(){
+      if (syncing) return;
+      syncing = true;
+      const lien = $("lien").value;
+      const hv = Number($("homeValue").value);
+      const firstLien = Number($("firstLien").value);
+      const line = Number($("lineAmt").value);
+      const cltv = calcCltvPct(lien, hv, firstLien, line);
+      if (Number.isFinite(cltv)) $("targetCltv").value = cltv.toFixed(2);
+      syncing = false;
+      updateCltvPill();
+      clearOutputs();
+    }
+
+    function updateCltvPill(){
+      const lien = $("lien").value;
+      const hv = Number($("homeValue").value);
+      const firstLien = Number($("firstLien").value);
+      const line = Number($("lineAmt").value);
+      const cltv = calcCltvPct(lien, hv, firstLien, line);
+      cltvPill.textContent = `CLTV: ${Number.isFinite(cltv) ? cltv.toFixed(2)+"%" : "—"}`;
+    }
+
+    // Drag/drop UX
+    drop.addEventListener("dragover",(e)=>{e.preventDefault();drop.classList.add("drag");});
+    drop.addEventListener("dragleave",()=>drop.classList.remove("drag"));
+    drop.addEventListener("drop",(e)=>{
+      e.preventDefault();drop.classList.remove("drag");
+      const f = (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) ? e.dataTransfer.files[0] : null;
+      if (!f) return;
+      lastSelectedFile = f;
+      setFileMeta(f);
+      handlePdf(f);
+    });
+
+    drop.addEventListener("click", ()=> fileInput.click());
+    fileInput.addEventListener("click", ()=> { fileInput.value=""; });
+
+    fileInput.addEventListener("change", ()=>{
+      const f = (fileInput.files && fileInput.files.length) ? fileInput.files[0] : null;
+      fileInput.value="";
+      if (!f) return;
+      lastSelectedFile = f;
+      setFileMeta(f);
+      handlePdf(f);
+    });
+
+    $("reparseBtn").addEventListener("click", ()=>{
+      if (!lastSelectedFile) return showError("No PDF selected yet. Use Upload or Drag & Drop first.");
+      handlePdf(lastSelectedFile);
+    });
+
+    $("clearCache").addEventListener("click", ()=>{
+      localStorage.removeItem(LS_KEY);
+      jsonEl.textContent="Upload a PDF to see parsed data.";
+      if (primeDisplay) primeDisplay.value="—";
+      setStatus("No PDF loaded");
+      clearOutputs();
+    });
+
+    $("priceBtn").addEventListener("click", ()=>{
+      clearError();
+      const sheet = loadSheet();
+      if (!sheet) return showError("Upload a rate sheet PDF first.");
+      try{
+        const inputs = getInputs();
+        if (!Number.isFinite(inputs.cltv)) return showError("Home Value must be > 0.");
+        enforceGuidelines(sheet, inputs);
+        const res = priceScenario(sheet, inputs);
+
+        startRateEl.textContent = res.startRatePct.toFixed(3) + "%";
+        primePill.textContent = "Prime: " + res.prime.toFixed(2) + "%";
+        marginPill.textContent = "Margin: " + res.marginPct.toFixed(3) + "%";
+        updateCltvPill();
+
+        const ioPay = computeIO(inputs.drawAmt, res.startRatePct);
+        ioPayEl.textContent = money(ioPay);
+
+        matchEl.textContent = res.row + " | " + res.col;
+        cellEl.textContent = res.cell;
+
+        breakdownEl.innerHTML="";
+        for (const b of res.breakdown){
+          const li=document.createElement("li");
+          li.innerHTML = `<span class="mono">${b.name}</span>: <span class="mono">${b.pp>=0?"+":""}${b.pp.toFixed(3)}%</span>`;
+          breakdownEl.appendChild(li);
+        }
+      } catch(e){
+        showError(e && e.message ? e.message : String(e));
+      }
+    });
+
+    $("lien").addEventListener("change", ()=>{ syncLineToTarget(); });
+    $("targetCltv").addEventListener("input", syncLineToTarget);
+    $("homeValue").addEventListener("input", syncLineToTarget);
+    $("firstLien").addEventListener("input", syncLineToTarget);
+    $("lineAmt").addEventListener("input", syncTargetToLine);
+
+    ["fico","drawAmt","product","drawTerm","occupancy","propType","state"].forEach(id=>{
+      $(id).addEventListener("input", ()=>{ updateCltvPill(); clearOutputs(); });
+      $(id).addEventListener("change", ()=>{ updateCltvPill(); clearOutputs(); });
+    });
+
+    // Init
+    updateCltvPill();
+    const cached = loadSheet();
+    if (cached){
+      jsonEl.textContent = JSON.stringify(cached, null, 2);
+      primePill.textContent = `Prime: ${Number(cached.prime_rate).toFixed(2)}%`;
+      if (primeDisplay) primeDisplay.value = Number(cached.prime_rate).toFixed(2) + "%";
+      setStatus("Loaded saved sheet ✓ (from browser)");
+    }
+  })();
+  </script>
+</body>
+</html>
